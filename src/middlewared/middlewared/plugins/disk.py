@@ -1398,6 +1398,30 @@ class DiskService(CRUDService):
         """
         await self.middleware.run_in_thread(geom.scan)
 
+        group_size = 2
+        pools = await self.middleware.call('pool.query')
+        for pool in pools:
+            vdevs = pool['topology']['data']
+            for vdev in vdevs:
+                new_size = 2
+                if vdev['type'] == 'MIRROR':
+                    mirror_size = len(vdev['children'])
+                    # if there's only one pool and it's one vdev only,
+                    # make group size equals to mirror size
+                    if len(pools) == 1 and len(vdevs) == 1:
+                        new_size = mirror_size
+                    # if there're multiple pools or vdevs, make it bigger than mirror size
+                    # to make sure system won't crash even when this pool failed
+                    else:
+                        new_size = mirror_size + 1
+                if vdev['type'] == 'RAIDZ2':
+                    new_size = 3
+                if vdev['type'] == 'RAIDZ3':
+                    new_size = 4
+                # use max group size
+                if group_size < new_size:
+                    group_size = new_size
+
         used_partitions = set()
         swap_devices = []
         disks = [i async for i in await self.middleware.call('pool.get_disks')]
@@ -1409,7 +1433,7 @@ class DiskService(CRUDService):
                     continue
                 consumers = list(g.consumers)
                 # If the mirror is degraded or disk is not in a pool lets remove it
-                if len(consumers) == 1 or any(filter(
+                if len(consumers) < group_size or any(filter(
                     lambda c: c.provider.geom.name not in disks, consumers
                 )):
                     await self.swaps_remove_disks([c.provider.geom.name for c in consumers])
@@ -1465,17 +1489,21 @@ class DiskService(CRUDService):
                 unused_partitions += partitions
                 continue
 
-            for i in range(int(len(partitions) / 2)):
+            for i in range(int(len(partitions) / group_size)):
                 if len(swap_devices) > MIRROR_MAX:
                     break
-                part_ab = partitions[0:2]
-                partitions = partitions[2:]
+                part_list = partitions[0:group_size]
+                partitions = partitions[group_size:]
+
+                # skip if there's no enough remaining disks
+                if len(part_list) < group_size:
+                    break
 
                 # We could have a single disk being used as swap, without mirror.
                 # If thats the case the swap must be removed for said disk to allow the
                 # new gmirror to be created
                 try:
-                    for i in part_ab:
+                    for i in part_list:
                         if i in list(swap_devices):
                             await self.swaps_remove_disks([i.split('p')[0]])
                             swap_devices.remove(i)
@@ -1483,16 +1511,15 @@ class DiskService(CRUDService):
                     self.logger.warn('Failed to remove disk from swap', exc_info=True)
                     # If something failed here there is no point in trying to create the mirror
                     continue
-                part_a, part_b = part_ab
 
                 if not dumpdev:
-                    dumpdev = await dumpdev_configure(part_a)
+                    dumpdev = await dumpdev_configure(part_list[0])
                 name = new_swap_name()
                 if name is None:
                     # Which means maximum has been reached and we can stop
                     break
                 try:
-                    await run('gmirror', 'create', name, part_a, part_b)
+                    await run('gmirror', 'create', name, *part_list)
                 except subprocess.CalledProcessError as e:
                     self.logger.warning('Failed to create gmirror %s: %s', name, e.stderr.decode())
                     continue
