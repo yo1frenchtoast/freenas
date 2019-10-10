@@ -62,8 +62,8 @@ class PWEncService(Service):
     def encrypt(self, data):
         return encrypt(data)
 
-    def decrypt(self, encrypted, _raise=False):
-        return decrypt(encrypted, _raise)
+    def decrypt(self, encrypted, _raise=False, decode=True):
+        return decrypt(encrypted, _raise, decode)
 
 
 async def setup(middleware):
@@ -72,7 +72,7 @@ async def setup(middleware):
 
 
 def encrypt(data):
-    data = data.encode('utf8')
+    data = data.encode('utf8') if isinstance(data, str) else data
 
     def pad(x):
         return x + (PWENC_BLOCK_SIZE - len(x) % PWENC_BLOCK_SIZE) * PWENC_PADDING
@@ -83,7 +83,7 @@ def encrypt(data):
     return encoded.decode()
 
 
-def decrypt(encrypted, _raise=False):
+def decrypt(encrypted, _raise=False, decode=True):
     if not encrypted:
         return ''
     try:
@@ -91,7 +91,8 @@ def decrypt(encrypted, _raise=False):
         nonce = encrypted[:8]
         encrypted = encrypted[8:]
         cipher = AES.new(PWEncService.get_secret(), AES.MODE_CTR, counter=Counter.new(64, prefix=nonce))
-        return cipher.decrypt(encrypted).rstrip(PWENC_PADDING).decode('utf8')
+        decrypted =  cipher.decrypt(encrypted).rstrip(PWENC_PADDING)
+        return decrypted.decode('utf8') if decode else decrypted
     except Exception:
         if _raise:
             raise
