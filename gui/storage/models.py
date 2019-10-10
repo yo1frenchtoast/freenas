@@ -76,6 +76,17 @@ class Volume(Model):
         return self.vol_name
 
 
+class Dataset(Model):
+    name = models.CharField(
+        unique=True,
+        max_length=255,
+    )
+    encryption_key = models.TextField(
+        null=True,
+        default=None,
+    )
+
+
 class Scrub(Model):
     scrub_volume = models.OneToOneField(
         Volume,
