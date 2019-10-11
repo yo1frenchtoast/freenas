@@ -2795,6 +2795,10 @@ class PoolDatasetService(CRUDService):
         return ds
 
     @private
+    async def delete_from_db(self, name):
+        return await self.middleware.call('datastore.delete', self.dataset_store, [['name', '=', name]])
+
+    @private
     def validate_encryption_data(self, job, verrors, encryption_dict, schema):
         opts = {}
         if not encryption_dict['enabled']:
