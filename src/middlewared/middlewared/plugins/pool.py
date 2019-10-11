@@ -19,8 +19,9 @@ import psutil
 
 from libzfs import ZFSException
 from middlewared.job import JobProgressBuffer, Pipes
-from middlewared.schema import (accepts, Attribute, Bool, Cron, Dict, EnumMixin, Int, List, Patch,
-                                Str, UnixPerm)
+from middlewared.schema import (
+    accepts, Attribute, Bool, Cron, Dict, EnumMixin, Int, List, Patch, Str, UnixPerm, Any,
+)
 from middlewared.service import (
     ConfigService, filterable, item_method, job, private, CallError, CRUDService, ValidationErrors
 )
@@ -2744,9 +2745,54 @@ class PoolDatasetUserPropService(CRUDService):
 class PoolDatasetService(CRUDService):
 
     attachment_delegates = []
+    dataset_store = 'storage.dataset'
 
     class Config:
         namespace = 'pool.dataset'
+
+    @private
+    @accepts(
+        Dict(
+            'dataset_db_create',
+            Any('encryption_key', null=True, default=None),
+            Int('id', default=None, null=True),
+            Str('name', required=True, empty=False),
+        )
+    )
+    async def insert_or_update(self, data):
+        ds_id = data.pop('id')
+        ds = await self.middleware.call(
+            'datastore.query', self.dataset_store,
+            [['id', '=', ds_id]] if ds_id else [['name', '=', data['name']]]
+        )
+        if not data['encryption_key']:
+            return
+
+        data['encryption_key'] = await self.middleware.call('pwenc.encrypt', data['encryption_key'])
+
+        if ds:
+            await self.middleware.call(
+                'datastore.update',
+                self.dataset_store,
+                ds[0]['id'], data
+            )
+        else:
+            await self.middleware.call(
+                'datastore.insert',
+                self.dataset_store,
+                data
+            )
+
+    @private
+    async def get_key(self, name):
+        ds = {'encryption_key': None, **(await self._get_instance(name))}
+        db_ds = await self.middleware.call('datastore.query', self.dataset_store, [['name', '=', name]])
+        if db_ds and db_ds[0]['encryption_key']:
+            ds['encryption_key'] = await self.middleware.call(
+                'pwenc.decrypt', db_ds[0]['encryption_key'], False, False
+            )
+
+        return ds
 
     @private
     def validate_encryption_data(self, job, verrors, encryption_dict, schema):
