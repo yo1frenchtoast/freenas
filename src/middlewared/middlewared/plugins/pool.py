@@ -2883,20 +2883,49 @@ class PoolDatasetService(CRUDService):
             raise CallError('Only datasets which are encrypted with passphrase can be locked')
         if ds['mountpoint']:
             await self.middleware.call('zfs.dataset.umount', id, {'force': options['force_umount']})
-        await self.middleware.call('zfs.dataset.unload_key', id, options)
+
+        datasets = [id]
+        if options['recursive']:
+            datasets.extend((await self.middleware.call(
+                'pool.dataset.list_encrypted_root_children', id, {'locked': False}
+            )))
+        failed = []
+        for dataset in datasets:
+            try:
+                await self.middleware.call('zfs.dataset.unload_key', dataset, {'recursive': False})
+            except CallError:
+                failed.append(dataset)
+
+        if failed:
+            raise CallError('\n'.join(f'Failed to lock {d}' for d in failed))
 
     @private
-    async def list_encrypted_root_children(self, parent, name_only=False):
+    def list_encrypted_root_children(self, parent, options=None):
+        options = options or {'name_only': False, 'locked': True, 'all': False}
+        retrieve_all = options.get('all')
+        lock = options.get('locked')
+        datasets = {ds['name']: ds for ds in self.query([['name', '^', parent]])}
         return [
-            d['name'] if name_only else d for d in await self.middleware.call(
+            d['name'] if options.get('name_only') else d for d in self.middleware.call_sync(
                 'datastore.query', self.dataset_store, [['name', '^', parent]]
             )
-            if d['name'] != parent
+            if d['name'] != parent and d['name'] in datasets and (
+                retrieve_all or (lock and datasets[d['name']]['locked']) or (
+                    not lock and not datasets[d['name']]['locked']
+                )
+            )
         ]
 
-    @accepts()
-    async def encrypted_root_descendants(self, name):
-        return await self.list_encrypted_root_children(name, name_only=True)
+    @accepts(
+        Str('name'),
+        Dict(
+            'options',
+            Bool('all', default=True),
+            Bool('locked', default=False),
+        )
+    )
+    def encrypted_root_descendants(self, name, options):
+        return self.list_encrypted_root_children(name, options)
 
     @accepts(
         Str('id'),
@@ -2938,7 +2967,7 @@ class PoolDatasetService(CRUDService):
 
         datasets = [{'name': id, 'encryption_key': key}]
         if options['recursive']:
-            datasets.extend((await self.list_encrypted_root_children(id)))
+            datasets.extend((await self.middleware.call('pool.dataset.list_encrypted_root_children', id)))
 
         failed = failed_mount = []
         for dataset in datasets:
