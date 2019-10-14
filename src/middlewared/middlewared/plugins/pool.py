@@ -3,6 +3,7 @@ import base64
 import contextlib
 import enum
 import errno
+import itertools
 import logging
 from datetime import datetime, time
 import os
@@ -2901,27 +2902,45 @@ class PoolDatasetService(CRUDService):
         Str('id'),
         Dict(
             'unlock_options',
+            Bool('key_file', default=False),
             Bool('recursive', default=False),
-            Str('passphrase', required=True),
+            Str('passphrase'),
         )
     )
-    async def unlock(self, id, options):
+    @job(lock=lambda args: f'dataset_unlock_{args[0]}', pipes=['encryption_key'], check_pipes=False)
+    async def unlock(self, job, id, options):
         ds = await self._get_instance(id)
         verrors = ValidationErrors()
+        key = None
+
         if not ds['locked']:
             verrors.add('id', f'{id} dataset is not locked')
-        elif ZFSKeyFormat(ds['key_format']['value']) != ZFSKeyFormat.PASSPHRASE:
-            verrors.add('id', 'Only datasets with passphrase selected as key format can be unlocked')
-        elif not await self.middleware.call('pool.dataset.check_key', id, {'key': options['passphrase']}):
-            verrors.add('unlock_options.passphrase', 'Supplied passphrase is not valid')
+        else:
+            key_format = ZFSKeyFormat(ds['key_format']['value'])
+            if key_format != ZFSKeyFormat.PASSPHRASE:
+                if not options['key_file']:
+                    verrors.add('unlock_options.key_file', 'This field is required')
+                else:
+                    job.check_pipe('encryption_key')
+                    key = job.pipes.encryption_key.r.read()
+            elif not options.get('passphrase'):
+                verrors.add('unlock_options.passphrase', 'Passphrase is required for encrypted dataset')
+            else:
+                key = options['passphrase']
+
+            if key and not await self.middleware.call('zfs.dataset.check_key', id, {'key': key}):
+                verrors.add(
+                    f'unlock_options.{"passphrase" if key_format == ZFSKeyFormat.PASSPHRASE else "key_file"}',
+                    'Supplied key is not valid'
+                )
 
         verrors.check()
 
-        datasets = [{'name': id, 'encryption_key': options['passphrase']}]
+        datasets = [{'name': id, 'encryption_key': key}]
         if options['recursive']:
             datasets.extend((await self.list_encrypted_root_children(id)))
 
-        failed = []
+        failed = failed_mount = []
         for dataset in datasets:
             try:
                 await self.middleware.call(
@@ -2929,11 +2948,16 @@ class PoolDatasetService(CRUDService):
                 )
             except CallError:
                 failed.append(dataset['name'])
+            else:
+                try:
+                    await self.middleware.call('zfs.dataset.mount', dataset['name'], {'recursive': False})
+                except CallError:
+                    failed_mount.append(dataset['name'])
 
-        if failed:
-            raise CallError('\n'.join(f'Failed to unlock {d}' for d in failed))
-
-        await self.middleware.call('zfs.dataset.mount', id, {'recursive': options['recursive']})
+        if failed or failed_mount:
+            raise CallError('\n'.join(itertools.chain(
+                (f'Failed to unlock {d}' for d in failed), (f'Failed to mount {d}' for d in failed_mount)
+            )))
 
     @filterable
     def query(self, filters=None, options=None):
@@ -2961,9 +2985,11 @@ class PoolDatasetService(CRUDService):
         making it match whatever pool.dataset.{create,update} uses as input.
         """
         def transform(dataset):
-            dataset['encrypted'] = dataset.pop('encryption') != 'off'
-            dataset['encryption_root'] = dataset.pop('encryptionroot') or None
-            dataset['key_loaded'] = dataset.pop('keystatus') == 'available'
+            if 'key_loaded' not in dataset:
+                # FIXME: This is a hack, please fix it in the right place
+                dataset['encrypted'] = dataset.pop('encryption') != 'off'
+                dataset['encryption_root'] = dataset.pop('encryptionroot') or None
+                dataset['key_loaded'] = dataset.pop('keystatus') == 'available'
 
             for orig_name, new_name, method in (
                 ('org.freenas:description', 'comments', None),
