@@ -2859,6 +2859,34 @@ class PoolDatasetService(CRUDService):
             }
         return opts
 
+    @accepts(
+        Str('id'),
+        Dict(
+            'lock_options',
+            Bool('recursive', default=True),
+        )
+    )
+    async def lock(self, id, options):
+        ds = await self.get_key(id)
+        if ds['encrypted'] and ZFSKeyFormat(ds['key_format']['value']) != ZFSKeyFormat.PASSPHRASE:
+            raise CallError('Only datasets which are encrypted with passphrase can be locked')
+        if ds['mountpoint']:
+            await self.middleware.call('zfs.dataset.umount', id, {'recursive': options['recursive']})
+        await self.middleware.call('zfs.dataset.unload_key', id, options)
+
+    @private
+    async def list_encrypted_root_children(self, parent, name_only=False):
+        return [
+            d['name'] if name_only else d for d in await self.middleware.call(
+                'datastore.query', self.dataset_store, [['name', '^', parent]]
+            )
+            if d['name'] != parent
+        ]
+
+    @accepts()
+    async def encrypted_root_descendants(self, name):
+        return await self.list_encrypted_root_children(name, name_only=True)
+
     @filterable
     def query(self, filters=None, options=None):
         """
