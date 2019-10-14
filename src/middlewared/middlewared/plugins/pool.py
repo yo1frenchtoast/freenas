@@ -2803,9 +2803,17 @@ class PoolDatasetService(CRUDService):
         ds = {'encryption_key': None, **(await self._get_instance(name))}
         db_ds = await self.middleware.call('datastore.query', self.dataset_store, [['name', '=', name]])
         if db_ds and db_ds[0]['encryption_key']:
-            ds['encryption_key'] = await self.middleware.call(
-                'pwenc.decrypt', db_ds[0]['encryption_key'], False, False
-            )
+            if ZFSKeyFormat(ds['key_format']['value']) == ZFSKeyFormat.PASSPHRASE or not (
+                await self.middleware.call('zfs.dataset.check_key', name, {'key': db_ds[0]['encryption_key']})
+            ):
+                # This can happen if we have a dataset which was deleted earlier and middlewared was not live
+                # to catch the event and a new one has been created in it's place
+                self.middleware.logger.debug(f'Removing encryption key for {name} from database.')
+                await self.delete_from_db(name)
+            else:
+                ds['encryption_key'] = await self.middleware.call(
+                    'pwenc.decrypt', db_ds[0]['encryption_key'], False, False
+                )
 
         return ds
 
@@ -2863,15 +2871,17 @@ class PoolDatasetService(CRUDService):
         Str('id'),
         Dict(
             'lock_options',
+            Bool('force_umount', default=False),
             Bool('recursive', default=True),
         )
     )
     async def lock(self, id, options):
+        # TODO: Add system dataset related checks
         ds = await self.get_key(id)
         if ds['encrypted'] and ZFSKeyFormat(ds['key_format']['value']) != ZFSKeyFormat.PASSPHRASE:
             raise CallError('Only datasets which are encrypted with passphrase can be locked')
         if ds['mountpoint']:
-            await self.middleware.call('zfs.dataset.umount', id, {'recursive': options['recursive']})
+            await self.middleware.call('zfs.dataset.umount', id, {'force': options['force_umount']})
         await self.middleware.call('zfs.dataset.unload_key', id, options)
 
     @private
