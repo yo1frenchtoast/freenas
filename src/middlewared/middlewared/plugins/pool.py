@@ -2901,7 +2901,7 @@ class PoolDatasetService(CRUDService):
 
     @private
     def list_encrypted_root_children(self, parent, options=None):
-        options = options or {'name_only': False, 'locked': True, 'all': False}
+        options = options or {'name_only': False, 'locked': True, 'all': False, 'add_parent': False}
         retrieve_all = options.get('all')
         lock = options.get('locked')
         datasets = {ds['name']: ds for ds in self.query([['name', '^', parent]])}
@@ -2909,7 +2909,7 @@ class PoolDatasetService(CRUDService):
             d['name'] if options.get('name_only') else d for d in self.middleware.call_sync(
                 'datastore.query', self.dataset_store, [['name', '^', parent]]
             )
-            if d['name'] != parent and d['name'] in datasets and (
+            if (options.get('add_parent') or d['name'] != parent) and d['name'] in datasets and (
                 retrieve_all or (lock and datasets[d['name']]['locked']) or (
                     not lock and not datasets[d['name']]['locked']
                 )
@@ -2922,10 +2922,11 @@ class PoolDatasetService(CRUDService):
             'options',
             Bool('all', default=True),
             Bool('locked', default=False),
+            Bool('add_parent', default=False),
         )
     )
     def encrypted_root_descendants(self, name, options):
-        return self.list_encrypted_root_children(name, options)
+        return self.list_encrypted_root_children(name, {'name_only': True, **options})
 
     @accepts(
         Str('id'),
@@ -2938,6 +2939,7 @@ class PoolDatasetService(CRUDService):
     )
     @job(lock=lambda args: f'dataset_unlock_{args[0]}', pipes=['encryption_key'], check_pipes=False)
     async def unlock(self, job, id, options):
+        # TODO: Should we really have them as coroutines ?
         ds = await self._get_instance(id)
         verrors = ValidationErrors()
         key = None
@@ -2969,6 +2971,10 @@ class PoolDatasetService(CRUDService):
         if options['recursive']:
             datasets.extend((await self.middleware.call('pool.dataset.list_encrypted_root_children', id)))
 
+        await self.unlock_datasets(datasets)
+
+    @private
+    async def unlock_datasets(self, datasets):
         failed = failed_mount = []
         for dataset in datasets:
             try:
