@@ -1826,6 +1826,23 @@ class PoolService(CRUDService):
                 entry[i] = pool[i]
             yield entry
 
+    @accepts(
+        Str('pool'),
+        Dict(
+            'options',
+            Bool('key_file', default=False),
+        )
+    )
+    @job(lock=lambda args: f'dataset_unlock_{args[0]}', pipes=['encryption_key'], check_pipes=False)
+    async def unlock_children(self, job, pool, options):
+        # TODO: extend functionality please
+        children = await self.middleware.call(
+            'pool.dataset.list_encrypted_root_children', pool, {
+                'add_parent': True, 'decrypt': True, 'locked': True,
+            }
+        )
+        await self.middleware.call('pool.dataset.unlock_datasets', children)
+
     @accepts(Dict(
         'pool_import',
         Str('guid', required=True),
@@ -2887,7 +2904,7 @@ class PoolDatasetService(CRUDService):
         datasets = [id]
         if options['recursive']:
             datasets.extend((await self.middleware.call(
-                'pool.dataset.list_encrypted_root_children', id, {'locked': False}
+                'pool.dataset.list_encrypted_root_children', id, {'locked': False, 'name_only': True}
             )))
         failed = []
         for dataset in datasets:
