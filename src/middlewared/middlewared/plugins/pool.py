@@ -2901,12 +2901,20 @@ class PoolDatasetService(CRUDService):
 
     @private
     def list_encrypted_root_children(self, parent, options=None):
-        options = options or {'name_only': False, 'locked': True, 'all': False, 'add_parent': False}
+        # TODO: Perhaps break this
+        options = options or {
+            'name_only': False, 'locked': True, 'all': False, 'add_parent': False, 'decrypt': False,
+        }
         retrieve_all = options.get('all')
         lock = options.get('locked')
         datasets = {ds['name']: ds for ds in self.query([['name', '^', parent]])}
         return [
-            d['name'] if options.get('name_only') else d for d in self.middleware.call_sync(
+            d['name'] if options.get('name_only') else {
+                'name': d['name'], 'encryption_key': d['encryption_key'] if not options.get(
+                    'decrypt'
+                ) else self.middleware.call_sync('pwenc.decrypt', d['encryption_key'], False, False)
+            }
+            for d in self.middleware.call_sync(
                 'datastore.query', self.dataset_store, [['name', '^', parent]]
             )
             if (options.get('add_parent') or d['name'] != parent) and d['name'] in datasets and (
