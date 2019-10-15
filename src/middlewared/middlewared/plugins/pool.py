@@ -2606,6 +2606,13 @@ class PoolService(CRUDService):
                         'Failed to inherit mountpoints for %s', pool['name'], exc_info=True,
                     )
 
+                # TODO: Let's have a pass at the latest changes keeping in mind that a user cannot change
+                #  encryption keys if they are stored in db for a dataset and update the code base accordingly
+                unlock_job = self.middleware.call_sync('pool.unlock_children', pool['name'])
+                unlock_job.wait_sync()
+                if unlock_job.error:
+                    self.logger.error(f'Failed to unlock children of {pool["name"]}: {unlock_job.error}')
+
         finally:
             proc.kill()
             proc.wait()
