@@ -1843,6 +1843,55 @@ class PoolService(CRUDService):
         )
         await self.middleware.call('pool.dataset.unlock_datasets', children)
 
+    @accepts(
+        Str('pool'),
+        Dict(
+            'options',
+            Bool('check_key', default=True),
+            List(
+                'datasets', items=[
+                    Dict('dataset', Str('name', required=True), Str('passphrase', required=True))
+                ]
+            )
+        )
+    )
+    @job(lock=lambda args: f'encrypted_datasets_{args[0]}')
+    def encrypted_datasets(self, job, pool, options):
+        # TODO: Let's not forget attachments please - how do we take care of those 
+        self.middleware.call_sync('pool.query', [['name', '=', pool]], {'get': True})
+        dataset_db = {
+            d['name']: d['encryption_key']
+            for d in self.middleware.call_sync(
+                'datastore.query', PoolDatasetService.dataset_store, [['name', '^', 'pool']]
+            )
+        }
+        supplied_passphrases = {d['name']: d['passphrase'] for d in options.get('datasets', [])}
+        datasets = []
+        for dataset in filter(
+            lambda d: d['encrypted'] and not d['key_loaded'] and d['name'] == d['encryption_root'],
+            self.middleware.call_sync('pool.dataset.query', [['name', '^', pool]])
+        ):
+            key_format = ZFSKeyFormat(dataset['key_format']['value'])
+            ds = {
+                'name': dataset['name'], 'key_format': key_format.value,
+                'key_present': False, 'valid_key': False,
+            }
+            key = None
+
+            if key_format != ZFSKeyFormat.PASSPHRASE:
+                ds['key_present'] = ds['name'] in dataset_db
+                if options.get('check_key') and ds['key_present']:
+                    key = self.middleware.call_sync('pwenc.decrypt', dataset_db[ds['name']], False, False)
+            elif options.get('check_key') and ds['name'] in supplied_passphrases:
+                key = supplied_passphrases[ds['name']]
+
+            if key:
+                ds['valid_key'] = self.middleware.call_sync('zfs.dataset.check_key', ds['name'], {'key': key})
+
+            datasets.append(ds)
+
+        return datasets
+
     @accepts(Dict(
         'pool_import',
         Str('guid', required=True),
@@ -2926,6 +2975,7 @@ class PoolDatasetService(CRUDService):
     @private
     def list_encrypted_root_children(self, parent, options=None):
         # TODO: Perhaps break this
+        # FIXME: This seems very messy, let's please come up with a better solution and remove this
         options = options or {
             'name_only': False, 'locked': True, 'all': False, 'add_parent': False, 'decrypt': False,
         }
